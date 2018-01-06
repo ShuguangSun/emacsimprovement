@@ -1,0 +1,36 @@
+diff --git a/lisp/shell.el b/lisp/shell.el
+index f046d7830e..ca8cc60c9c 100644
+--- a/lisp/shell.el
++++ b/lisp/shell.el
+@@ -727,11 +727,28 @@ shell
+                (null explicit-shell-file-name)
+                (null (getenv "ESHELL")))
+           (set (make-local-variable 'explicit-shell-file-name)
+-               (expand-file-name
++               ;;(expand-file-name ;; add c: to /bin/sh
+                 (file-local-name
+                  (read-file-name
+-                  "Remote shell path: " default-directory shell-file-name
+-                  t shell-file-name)))))))
++                  "Remote shell path: "
++                  (concat (file-remote-p default-directory) "/")
++                  (cadr (assoc
++                        'tramp-remote-shell
++                        (assoc (file-remote-p default-directory 'method) tramp-methods)))
++                  t
++                  (cadr (assoc
++                        'tramp-remote-shell
++                        (assoc (file-remote-p default-directory 'method) tramp-methods)))
++                  ))
++                ;;)
++                )
++        ;; need to be improved. It just works for /bin/sh
++        (set (make-local-variable 'explicit-sh-args)
++             (cadr (assoc
++                   'tramp-remote-shell-args
++                   (assoc (file-remote-p default-directory 'method) tramp-methods)))
++             )
++        )))
+
+   ;; The buffer's window must be correctly set when we call comint
+   ;; (so that comint sets the COLUMNS env var properly).

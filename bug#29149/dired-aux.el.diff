@@ -1,0 +1,21 @@
+diff --git a/lisp/dired-aux.el b/lisp/dired-aux.el
+index 7fff7e7a24..d3ecde95ec 100644
+--- a/lisp/dired-aux.el
++++ b/lisp/dired-aux.el
+@@ -794,13 +794,14 @@ dired-shell-stuff-it
+           (and in-background (not sequentially) (not (eq system-type 'ms-dos))))
+          (w32-shell (and (fboundp 'w32-shell-dos-semantics)
+                          (w32-shell-dos-semantics)))
++         (file-remote (file-remote-p default-directory))
+          ;; The way to run a command in background in Windows shells
+          ;; is to use the START command.  The /B switch means not to
+          ;; create a new window for the command.
+-         (cmd-prefix (if w32-shell "start /b " ""))
++         (cmd-prefix (if (and w32-shell (not file-remote)) "start /b " ""))
+          ;; Windows shells don't support chaining with ";", they use
+          ;; "&" instead.
+-         (cmd-sep (if (and (not w32-shell) (not parallel-in-background))
++         (cmd-sep (if (and (or (not w32-shell) file-remote) (not parallel-in-background))
+                       ";"
+                     "&"))
+ 	 (stuff-it
