@@ -1,0 +1,25 @@
+diff --git a/lisp/icomplete.el b/lisp/icomplete.el
+index b37db8869b..3f9b48b3c3 100644
+--- a/lisp/icomplete.el
++++ b/lisp/icomplete.el
+@@ -1,6 +1,6 @@
+ ;;; icomplete.el --- minibuffer completion incremental feedback
+ 
+-;; Copyright (C) 1992-1994, 1997, 1999, 2001-2018 Free Software
++;; Copyright (C) 1992-1994, 1997, 1999, 2001-2017 Free Software
+ ;; Foundation, Inc.
+ 
+ ;; Author: Ken Manheimer <klm@i.am>
+@@ -387,7 +387,11 @@ icomplete-completions
+       (if last (setcdr last nil))
+       (when (and minibuffer-completing-file-name
+                  icomplete-with-completion-tables)
+-        (setq comps (completion-pcm--filename-try-filter comps)))
++        (setq comps (completion-pcm--filename-try-filter comps))
++        ;; no directory
++        (setq name (file-name-nondirectory name)))
++      ;; get all completions in cached table
++      (setq comps (completion--all-sorted-completions (icomplete--field-beg) name comps))
+       (let* ((most-try
+               (if (and base-size (> base-size 0))
+                   (completion-try-completion

@@ -1,0 +1,335 @@
+diff --git a/lisp/minibuffer.el b/lisp/minibuffer.el
+index 4d14b2641f..a921dfdba4 100644
+--- a/lisp/minibuffer.el
++++ b/lisp/minibuffer.el
+@@ -1,6 +1,6 @@
+ ;;; minibuffer.el --- Minibuffer completion functions -*- lexical-binding: t -*-
+ 
+-;; Copyright (C) 2008-2018 Free Software Foundation, Inc.
++;; Copyright (C) 2008-2017 Free Software Foundation, Inc.
+ 
+ ;; Author: Stefan Monnier <monnier@iro.umontreal.ca>
+ ;; Package: emacs
+@@ -977,6 +977,10 @@ completion--replace
+     (unless (zerop suffix-len)
+       (setq end (- end suffix-len))
+       (setq newtext (substring newtext 0 (- suffix-len))))
++    ;; After this amendment, the newtext has no directory
++    (if minibuffer-completing-file-name
++        (setq newtext (concat (file-name-directory (buffer-substring-no-properties beg end)) newtext))
++        )
+     (goto-char beg)
+     (let ((length (- end beg)))         ;Read `end' before we insert the text.
+       (insert-and-inherit newtext)
+@@ -999,7 +1003,11 @@ completion--cycle-threshold
+          (over (completion--category-override cat 'cycle)))
+     (if over (cdr over) completion-cycle-threshold)))
+ 
+-(defvar-local completion-all-sorted-completions nil)
++;; If there is a proper completion-all-sorted-completions-table,
++;; fuction completion-all-sorted-completions needs not to be called
++(defvar-local completion-all-sorted-completions-table nil)
++;; The string to build completion-all-sorted-completions-table
++(defvar-local completion--all-sorted-completions-name nil)
+ (defvar-local completion--all-sorted-completions-location nil)
+ (defvar completion-cycling nil)
+ 
+@@ -1030,15 +1038,18 @@ completion--do-completion
+ TRY-COMPLETION-FUNCTION is a function to use in place of `try-completion'.
+ EXPECT-EXACT, if non-nil, means that there is no need to tell the user
+ when the buffer's text is already an exact match."
+-  (let* ((string (buffer-substring beg end))
++  (let* ((string (if minibuffer-completing-file-name
++                     (file-name-nondirectory (buffer-substring-no-properties beg end))
++                   (buffer-substring-no-properties beg end)))
+          (md (completion--field-metadata beg))
+-         (comp (funcall (or try-completion-function
+-                            'completion-try-completion)
+-                        string
+-                        minibuffer-completion-table
+-                        minibuffer-completion-predicate
+-                        (- (point) beg)
+-                        md)))
++         ;; completion-all-sorted-completions takes care about the predict
++         (comp (completion-try-completion
++                string
++                (completion-all-sorted-completions beg end)
++                nil
++                (length string)
++                md))
++         )
+     (cond
+      ((null comp)
+       (minibuffer-hide-completions)
+@@ -1080,8 +1091,13 @@ completion--do-completion
+ 
+           ;; It did find a match.  Do we match some possibility exactly now?
+           (let* ((exact (test-completion completion
+-                                         minibuffer-completion-table
+-                                         minibuffer-completion-predicate))
++                                         (if (consp completion-all-sorted-completions-table)
++                                             completion-all-sorted-completions-table
++                                           minibuffer-completion-table
++                                           )
++                                         (if (not (consp completion-all-sorted-completions-table))
++                                             minibuffer-completion-predicate)
++                                         ))
+                  (threshold (completion--cycle-threshold md))
+                  (comps
+                   ;; Check to see if we want to do cycling.  We do it
+@@ -1095,12 +1111,17 @@ completion--do-completion
+                              (or (not completed)
+                                  (< (car (completion-boundaries
+                                           (substring completion 0 comp-pos)
+-                                          minibuffer-completion-table
+-                                          minibuffer-completion-predicate
++                                          (if (consp completion-all-sorted-completions-table)
++                                              completion-all-sorted-completions-table
++                                            minibuffer-completion-table
++                                            )
++                                          (if (not (consp completion-all-sorted-completions-table))
++                                              minibuffer-completion-predicate)
+                                          ""))
+                                    comp-pos)))
+-                   (completion-all-sorted-completions beg end))))
+-            (completion--flush-all-sorted-completions)
++                    (completion-all-sorted-completions beg end))))
++            ;; it is not necessary to flush tables for each call
++            ;; (completion--flush-all-sorted-completions)
+             (cond
+              ((and (consp (cdr comps)) ;; There's something to cycle.
+                    (not (ignore-errors
+@@ -1110,7 +1131,11 @@ completion--do-completion
+               ;; Not more than completion-cycle-threshold remaining
+               ;; completions: let's cycle.
+               (setq completed t exact t)
+-              (completion--cache-all-sorted-completions beg end comps)
++              ;; It is not necessary to flush tables for each call
++              ;; Would it be more efficient to replace the cached table
++              ;; with the new restricted one?
++              ;; For filename completion, it is based on base directory.
++              (completion-all-sorted-completions beg end)
+               (minibuffer-force-complete beg end))
+              (completed
+               ;; We could also decide to refresh the completions,
+@@ -1159,7 +1184,9 @@ completion--in-region-1
+   ;; mark the completion buffer obsolete.
+   (setq this-command 'completion-at-point)
+   (unless (eq 'completion-at-point last-command)
+-    (completion--flush-all-sorted-completions)
++    ;; flush with no args will always flush the completion table
++    ;; not necessary to flush here
++    ;; (completion--flush-all-sorted-completions)
+     (setq minibuffer-scroll-window nil))
+ 
+   (cond
+@@ -1177,7 +1204,7 @@ completion--in-region-1
+ 	    (scroll-up)))
+         nil)))
+    ;; If we're cycling, keep on cycling.
+-   ((and completion-cycling completion-all-sorted-completions)
++   ((and completion-cycling completion-all-sorted-completions-table)
+     (minibuffer-force-complete beg end)
+     t)
+    (t (pcase (completion--do-completion beg end)
+@@ -1185,20 +1212,39 @@ completion--in-region-1
+         (_     t)))))
+ 
+ (defun completion--cache-all-sorted-completions (beg end comps)
+-  (add-hook 'after-change-functions
+-            'completion--flush-all-sorted-completions nil t)
++  ;; The value of after-change-functions is (jit-lock-after-change t),
++  ;; it makes the flush called without parameters every time
++  ;; (add-hook 'after-change-functions
++  ;;           'completion--flush-all-sorted-completions nil t)
+   (setq completion--all-sorted-completions-location
+         (cons (copy-marker beg) (copy-marker end)))
+-  (setq completion-all-sorted-completions comps))
++  ;; The string to build the completion table
++  (setq completion--all-sorted-completions-name
++        (if minibuffer-completing-file-name
++            (file-name-directory (buffer-substring-no-properties beg end))
++          (buffer-substring-no-properties beg end)))
++  (setq completion-all-sorted-completions-table comps))
+ 
+ (defun completion--flush-all-sorted-completions (&optional start end _len)
+   (unless (and start end
+-               (or (> start (cdr completion--all-sorted-completions-location))
+-                   (< end (car completion--all-sorted-completions-location))))
++               completion--all-sorted-completions-location
++               completion--all-sorted-completions-name
++               ;; not sure which is more efficient to compare location or the string
++               (not (or (> start (cdr completion--all-sorted-completions-location))
++                        (< end (car completion--all-sorted-completions-location))))
++               (if minibuffer-completing-file-name
++                   (let ((strc (compare-strings
++                                completion--all-sorted-completions-name nil nil
++                                (file-name-directory (buffer-substring-no-properties start end)) nil nil t)))
++                     (eq t strc))
++                 (eq 0 (string-match-p (regexp-quote completion--all-sorted-completions-name)
++                                       (buffer-substring-no-properties start end)))
++                 ))
+     (remove-hook 'after-change-functions
+                  'completion--flush-all-sorted-completions t)
+     (setq completion-cycling nil)
+-    (setq completion-all-sorted-completions nil)))
++    (setq completion--all-sorted-completions-name nil)
++    (setq completion-all-sorted-completions-table nil)))
+ 
+ (defun completion--metadata (string base md-at-point table pred)
+   ;; Like completion-metadata, but for the specific case of getting the
+@@ -1209,21 +1255,46 @@ completion--metadata
+       (completion-metadata (substring string 0 base) table pred))))
+ 
+ (defun completion-all-sorted-completions (&optional start end)
+-  (or completion-all-sorted-completions
++
++  ;; completion--flush-all-sorted-completions is always called without args...
++  ;; which means it will always flush the completion table
++  ;; therefore, need to take care about it out there
++  (unless (and start end
++               completion--all-sorted-completions-location
++               completion--all-sorted-completions-name
++               ;; not sure which is more sufficient, to compare location or string
++               (not (or (> start (cdr completion--all-sorted-completions-location))
++                        (< end (car completion--all-sorted-completions-location))))
++               (if minibuffer-completing-file-name
++                   (let ((strc (compare-strings
++                                completion--all-sorted-completions-name nil nil
++                                (file-name-directory (buffer-substring-no-properties start end)) nil nil t)))
++                     (eq t strc))
++                 (eq 0 (string-match-p (regexp-quote completion--all-sorted-completions-name)
++                                       (buffer-substring-no-properties start end)))
++                 ))
++        (completion--flush-all-sorted-completions)
++    )
++
++  (or completion-all-sorted-completions-table
+       (let* ((start (or start (minibuffer-prompt-end)))
+              (end (or end (point-max)))
+-             (string (buffer-substring start end))
++             (string (if minibuffer-completing-file-name
++                         ;; It builds the completion list on the directory, instead the substring
++                         ;; not sure which one is more effecient
++                         (file-name-directory (buffer-substring-no-properties start end))
++                       (buffer-substring-no-properties start end)))
+              (md (completion--field-metadata start))
+              (all (completion-all-completions
+                    string
+                    minibuffer-completion-table
+                    minibuffer-completion-predicate
+-                   (- (point) start)
++                   (length string)
+                    md))
+              (last (last all))
+              (base-size (or (cdr last) 0))
+-             (all-md (completion--metadata (buffer-substring-no-properties
+-                                            start (point))
++             ;; predict and metatdata works here
++             (all-md (completion--metadata string
+                                            base-size md
+                                            minibuffer-completion-table
+                                            minibuffer-completion-predicate))
+@@ -1252,6 +1323,42 @@ completion-all-sorted-completions
+           (completion--cache-all-sorted-completions
+            start end (nconc all base-size))))))
+ 
++;; This one acceptable cached table.
++;; It could be made into function completion-all-sorted-completions
++(defun completion--all-sorted-completions (start name table)
++
++  (let* ((md (completion--field-metadata start))
++         (all (completion-all-completions
++               name table nil (length name) md))
++         (last (last all))
++         (base-size (or (cdr last) 0))
++         (all-md (completion--metadata name
++                                       base-size md
++                                       table
++                                       nil))
++         (sort-fun (completion-metadata-get all-md 'cycle-sort-function)))
++
++    (when last
++      (setcdr last nil)
++
++      ;; Delete duplicates: do it after setting last's cdr to nil (so
++      ;; it's a proper list), and be careful to reset `last' since it
++      ;; may be a different cons-cell.
++      (setq all (delete-dups all))
++      (setq last (last all))
++
++      (setq all (if sort-fun (funcall sort-fun all)
++                  ;; Prefer shorter completions, by default.
++                  (sort all (lambda (c1 c2) (< (length c1) (length c2))))))
++      ;; Prefer recently used completions.
++      (when (minibufferp)
++        (let ((hist (symbol-value minibuffer-history-variable)))
++          (setq all (sort all (lambda (c1 c2)
++                                (> (length (member c1 hist))
++                                   (length (member c2 hist))))))))
++      )))
++
++
+ (defun minibuffer-force-complete-and-exit ()
+   "Complete the minibuffer with first of the matches and exit."
+   (interactive)
+@@ -1293,7 +1400,7 @@ minibuffer-force-complete
+       (setq this-command 'completion-at-point) ;For completion-in-region.
+       ;; If completing file names, (car all) may be a directory, so we'd now
+       ;; have a new set of possible completions and might want to reset
+-      ;; completion-all-sorted-completions to nil, but we prefer not to,
++      ;; completion-all-sorted-completions-table to nil, but we prefer not to,
+       ;; so that repeated calls minibuffer-force-complete still cycle
+       ;; through the previous possible completions.
+       (let ((last (last all)))
+@@ -1787,13 +1894,23 @@ minibuffer-completion-help
+   (message "Making completion list...")
+   (let* ((start (or start (minibuffer-prompt-end)))
+          (end (or end (point-max)))
++         ;; Does it need to keep the text properties?
+          (string (buffer-substring start end))
++         (string (if minibuffer-completing-file-name
++                     (file-name-nondirectory (buffer-substring-no-properties start end))
++                   (buffer-substring-no-properties start end)))
+          (md (completion--field-metadata start))
+          (completions (completion-all-completions
+                        string
+-                       minibuffer-completion-table
+-                       minibuffer-completion-predicate
+-                       (- (point) start)
++                       ;; If there is cached table, using the table
++                       (if (consp completion-all-sorted-completions-table)
++                           completion-all-sorted-completions-table
++                         minibuffer-completion-table
++                         )
++                       (if (consp completion-all-sorted-completions-table)
++                           nil
++                         minibuffer-completion-predicate)
++                       (length string)
+                        md)))
+     (message nil)
+     (if (or (null completions)
+@@ -1810,11 +1927,19 @@ minibuffer-completion-help
+       (let* ((last (last completions))
+              (base-size (or (cdr last) 0))
+              (prefix (unless (zerop base-size) (substring string 0 base-size)))
+-             (all-md (completion--metadata (buffer-substring-no-properties
+-                                            start (point))
++             (string2 (if minibuffer-completing-file-name
++                          (file-name-nondirectory (buffer-substring-no-properties start (point)))
++                        (buffer-substring-no-properties start (point))))
++             (all-md (completion--metadata string2
+                                            base-size md
+-                                           minibuffer-completion-table
+-                                           minibuffer-completion-predicate))
++                                           (if (consp completion-all-sorted-completions-table)
++                                               completion-all-sorted-completions-table
++                                             minibuffer-completion-table
++                                             )
++                                           (if (consp completion-all-sorted-completions-table)
++                                               nil
++                                             minibuffer-completion-predicate)
++                                           ))
+              (afun (or (completion-metadata-get all-md 'annotation-function)
+                        (plist-get completion-extra-properties
+                                   :annotation-function)
